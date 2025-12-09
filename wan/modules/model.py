@@ -7,7 +7,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention
-
+import pdb
 __all__ = ['WanModel']
 
 
@@ -470,6 +470,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # context
         context_lens = None
+        # pdb.set_trace()
         context = self.text_embedding(
             torch.stack([
                 torch.cat(

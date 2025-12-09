@@ -24,6 +24,7 @@ from .modules.animate import CLIPModel
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_1 import Wan2_1_VAE
 from .modules.animate.animate_utils import TensorList, get_loraconfig
+from .utils.device import autocast_for_device, resolve_device
 from .utils.fm_solvers import (
     FlowDPMSolverMultistepScheduler,
     get_sampling_sigmas,
@@ -47,7 +48,8 @@ class WanAnimate:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
-        use_relighting_lora=False
+        use_relighting_lora=False,
+        device=None,
     ):
         r"""
         Initializes the generation model components.
@@ -77,14 +79,17 @@ class WanAnimate:
             use_relighting_lora (`bool`, *optional*, defaults to False):
                Whether to use relighting lora for character replacement. 
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = device if device is not None else resolve_device(
+            device_id=device_id)
+        self.device_type = self.device.type
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
         self.init_on_cpu = init_on_cpu
 
         self.num_train_timesteps = config.num_train_timesteps
-        self.param_dtype = config.param_dtype
+        self.param_dtype = config.param_dtype if self.device_type == "cuda" else torch.float32
+        self.compute_dtype = self.param_dtype
 
         if t5_fsdp or dit_fsdp or use_sp:
             self.init_on_cpu = False
@@ -99,8 +104,9 @@ class WanAnimate:
             shard_fn=shard_fn if t5_fsdp else None,
         )
 
+        clip_dtype = torch.float16 if self.device_type == "cuda" else torch.float32
         self.clip = CLIPModel(
-            dtype=torch.float16,
+            dtype=clip_dtype,
             device=self.device,
             checkpoint_path=os.path.join(checkpoint_dir,
                                          config.clip_checkpoint),
@@ -192,7 +198,7 @@ class WanAnimate:
             model = shard_fn(model, use_lora=use_lora)
         else:
             if convert_model_dtype:
-                model.to(self.param_dtype)
+                model.to(self.compute_dtype)
             if not self.init_on_cpu:
                 model.to(self.device)
 
@@ -449,7 +455,7 @@ class WanAnimate:
 
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
-                    batch[key] = value.to(device=self.device, dtype=torch.bfloat16)
+                    batch[key] = value.to(device=self.device, dtype=torch.float32)
 
             ref_pixel_values = batch["refer_pixel_values"]
             refer_t_pixel_values = batch["refer_t_pixel_values"]
@@ -479,7 +485,7 @@ class WanAnimate:
                 raise ValueError(f"max_seq_len {max_seq_len} is not divisible by sp_size {self.sp_size}")
 
             with (
-                torch.autocast(device_type=str(self.device), dtype=torch.bfloat16, enabled=True),
+                autocast_for_device(self.device, self.compute_dtype),
                 torch.no_grad()
             ):
                 if sample_solver == 'unipc':
@@ -505,19 +511,19 @@ class WanAnimate:
 
                 latents = noise
 
-                pose_latents_no_ref =  self.vae.encode(conditioning_pixel_values.to(torch.bfloat16))
+                pose_latents_no_ref =  self.vae.encode(conditioning_pixel_values.to(torch.float32))
                 pose_latents_no_ref = torch.stack(pose_latents_no_ref)
                 pose_latents = torch.cat([pose_latents_no_ref], dim=2)
 
                 ref_pixel_values = rearrange(ref_pixel_values, "t c h w -> 1 c t h w")
-                ref_latents =  self.vae.encode(ref_pixel_values.to(torch.bfloat16))
+                ref_latents =  self.vae.encode(ref_pixel_values.to(torch.float32))
                 ref_latents = torch.stack(ref_latents)
 
                 mask_ref = self.get_i2v_mask(1, lat_h, lat_w, 1, device=self.device)
-                y_ref = torch.concat([mask_ref, ref_latents[0]]).to(dtype=torch.bfloat16, device=self.device)
+                y_ref = torch.concat([mask_ref, ref_latents[0]]).to(dtype=torch.float32, device=self.device)
 
                 img = ref_pixel_values[0, :, 0]
-                clip_context = self.clip.visual([img[:, None, :, :]]).to(dtype=torch.bfloat16, device=self.device)
+                clip_context = self.clip.visual([img[:, None, :, :]]).to(dtype=torch.float32, device=self.device)
 
                 if mask_reft_len > 0:
                     if replace_flag:
@@ -577,13 +583,13 @@ class WanAnimate:
                         )[0]
                         msk_reft = self.get_i2v_mask(lat_t, lat_h, lat_w, mask_reft_len, device=self.device)
 
-                y_reft = torch.concat([msk_reft, y_reft]).to(dtype=torch.bfloat16, device=self.device)
+                y_reft = torch.concat([msk_reft, y_reft]).to(dtype=torch.float32, device=self.device)
                 y = torch.concat([y_ref, y_reft], dim=1)
 
                 arg_c = {
                     "context": context, 
                     "seq_len": max_seq_len,
-                    "clip_fea": clip_context.to(dtype=torch.bfloat16, device=self.device),
+                    "clip_fea": clip_context.to(dtype=torch.float32, device=self.device),
                     "y": [y],
                     "pose_latents": pose_latents,
                     "face_pixel_values": face_pixel_values,
@@ -594,7 +600,7 @@ class WanAnimate:
                     arg_null = {
                         "context": context_null,
                         "seq_len": max_seq_len,
-                        "clip_fea": clip_context.to(dtype=torch.bfloat16, device=self.device),
+                        "clip_fea": clip_context.to(dtype=torch.float32, device=self.device),
                         "y": [y],
                         "pose_latents": pose_latents,
                         "face_pixel_values": face_pixel_values_uncond,

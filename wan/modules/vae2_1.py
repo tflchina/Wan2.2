@@ -2,7 +2,6 @@
 import logging
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -58,7 +57,7 @@ class Upsample(nn.Upsample):
 
     def forward(self, x):
         """
-        Fix bfloat16 support for nearest neighbor interpolation.
+        Fix float32 support for nearest neighbor interpolation.
         """
         return super().forward(x.float()).type_as(x)
 
@@ -648,14 +647,20 @@ class Wan2_1_VAE:
         """
         videos: A list of videos each with shape [C, T, H, W].
         """
-        with amp.autocast(dtype=self.dtype):
+        device_type = videos[0].device.type
+        target_dtype = self.dtype if device_type == "cuda" else torch.float32
+        with torch.amp.autocast(
+                device_type=device_type, dtype=target_dtype):
             return [
                 self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0)
                 for u in videos
             ]
 
     def decode(self, zs):
-        with amp.autocast(dtype=self.dtype):
+        device_type = zs[0].device.type
+        target_dtype = self.dtype if device_type == "cuda" else torch.float32
+        with torch.amp.autocast(
+                device_type=device_type, dtype=target_dtype):
             return [
                 self.model.decode(u.unsqueeze(0),
                                   self.scale).float().clamp_(-1, 1).squeeze(0)

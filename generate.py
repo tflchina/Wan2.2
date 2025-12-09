@@ -16,6 +16,7 @@ from PIL import Image
 
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
+from wan.utils.device import resolve_device, synchronize
 from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import merge_video_audio, save_video, str2bool
@@ -221,6 +222,11 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
+    parser.add_argument(
+        "--cpu_only",
+        action="store_true",
+        default=False,
+        help="Force running on CPU even if CUDA is available.")
 
     # animate
     parser.add_argument(
@@ -316,15 +322,24 @@ def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
-    device = local_rank
+    device = resolve_device(device_id=local_rank, force_cpu=args.cpu_only)
     _init_logging(rank)
+
+    if world_size > 1 and device.type != "cuda":
+        raise RuntimeError(
+            "CPU-only mode does not support distributed inference. Please set WORLD_SIZE=1."
+        )
 
     if args.offload_model is None:
         args.offload_model = False if world_size > 1 else True
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
+    if device.type == "cpu" and args.offload_model:
+        logging.info("Disabling offload_model in CPU-only mode.")
+        args.offload_model = False
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        if device.type == "cuda":
+            torch.cuda.set_device(local_rank)
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
@@ -405,7 +420,7 @@ def generate(args):
         wan_t2v = wan.WanT2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
-            device_id=device,
+            device=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
             dit_fsdp=args.dit_fsdp,
@@ -430,7 +445,7 @@ def generate(args):
         wan_ti2v = wan.WanTI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
-            device_id=device,
+            device=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
             dit_fsdp=args.dit_fsdp,
@@ -457,7 +472,7 @@ def generate(args):
         wan_animate = wan.WanAnimate(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
-            device_id=device,
+            device=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
             dit_fsdp=args.dit_fsdp,
@@ -484,7 +499,7 @@ def generate(args):
         wan_s2v = wan.WanS2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
-            device_id=device,
+            device=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
             dit_fsdp=args.dit_fsdp,
@@ -518,7 +533,7 @@ def generate(args):
         wan_i2v = wan.WanI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
-            device_id=device,
+            device=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
             dit_fsdp=args.dit_fsdp,
@@ -562,7 +577,7 @@ def generate(args):
                 merge_video_audio(video_path=args.save_file, audio_path="tts.wav")
     del video
 
-    torch.cuda.synchronize()
+    synchronize(device)
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

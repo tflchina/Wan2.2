@@ -503,6 +503,8 @@ class CLIPModel:
     def __init__(self, dtype, device, checkpoint_path, tokenizer_path):
         self.dtype = dtype
         self.device = device
+        self.device_type = device.type
+        self.autocast_dtype = dtype if self.device_type == "cuda" else torch.float32
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
 
@@ -537,6 +539,7 @@ class CLIPModel:
         videos = self.transforms.transforms[-1](videos.mul_(0.5).add_(0.5))
 
         # forward
-        with torch.cuda.amp.autocast(dtype=self.dtype):
+        with torch.amp.autocast(
+                device_type=self.device_type, dtype=self.autocast_dtype):
             out = self.model.visual(videos, use_31_block=True)
             return out

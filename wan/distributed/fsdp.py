@@ -12,7 +12,7 @@ from torch.distributed.utils import _free_storage
 def shard_model(
     model,
     device_id,
-    param_dtype=torch.bfloat16,
+    param_dtype=torch.float32,
     reduce_dtype=torch.float32,
     buffer_dtype=torch.float32,
     process_group=None,

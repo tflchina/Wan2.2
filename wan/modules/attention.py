@@ -3,13 +3,13 @@ import torch
 
 try:
     import flash_attn_interface
-    FLASH_ATTN_3_AVAILABLE = True
+    FLASH_ATTN_3_AVAILABLE = False
 except ModuleNotFoundError:
     FLASH_ATTN_3_AVAILABLE = False
 
 try:
     import flash_attn
-    FLASH_ATTN_2_AVAILABLE = True
+    FLASH_ATTN_2_AVAILABLE = False
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
@@ -33,7 +33,7 @@ def flash_attention(
     causal=False,
     window_size=(-1, -1),
     deterministic=False,
-    dtype=torch.bfloat16,
+    dtype=torch.float32,
     version=None,
 ):
     """
@@ -47,11 +47,11 @@ def flash_attention(
     causal:         bool. Whether to apply causal attention mask.
     window_size:    (left right). If not (-1, -1), apply sliding window local attention.
     deterministic:  bool. If True, slightly slower and uses more memory.
-    dtype:          torch.dtype. Apply when dtype of q/k/v is not float16/bfloat16.
+    dtype:          torch.dtype. Apply when dtype of q/k/v is not float16/float32.
     """
-    half_dtypes = (torch.float16, torch.bfloat16)
+    half_dtypes = (torch.float16, torch.float32)
     assert dtype in half_dtypes
-    assert q.device.type == 'cuda' and q.size(-1) <= 256
+    # assert q.device.type == 'cuda' and q.size(-1) <= 256
 
     # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
@@ -142,7 +142,7 @@ def attention(
     causal=False,
     window_size=(-1, -1),
     deterministic=False,
-    dtype=torch.bfloat16,
+    dtype=torch.float32,
     fa_version=None,
 ):
     if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:

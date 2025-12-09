@@ -144,9 +144,9 @@ def sp_dit_forward(
     return [u.float() for u in x]
 
 
-def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
+def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.float32):
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-    half_dtypes = (torch.float16, torch.bfloat16)
+    half_dtypes = (torch.float16, torch.float32)
 
     def half(x):
         return x if x.dtype in half_dtypes else x.to(dtype)

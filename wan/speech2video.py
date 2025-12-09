@@ -12,7 +12,6 @@ from functools import partial
 
 import numpy as np
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 import torchvision.transforms.functional as TF
 from decord import VideoReader
@@ -28,6 +27,7 @@ from .modules.s2v.audio_encoder import AudioEncoder
 from .modules.s2v.model_s2v import WanModel_S2V, sp_attn_forward_s2v
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_1 import Wan2_1_VAE
+from .utils.device import autocast_for_device, empty_cache, resolve_device, synchronize
 from .utils.fm_solvers import (
     FlowDPMSolverMultistepScheduler,
     get_sampling_sigmas,
@@ -85,14 +85,17 @@ class WanS2V:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = device if device is not None else resolve_device(
+            device_id=device_id)
+        self.device_type = self.device.type
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
         self.init_on_cpu = init_on_cpu
 
         self.num_train_timesteps = config.num_train_timesteps
-        self.param_dtype = config.param_dtype
+        self.param_dtype = config.param_dtype if self.device_type == "cuda" else torch.float32
+        self.compute_dtype = self.param_dtype
 
         if t5_fsdp or dit_fsdp or use_sp:
             self.init_on_cpu = False
@@ -115,11 +118,11 @@ class WanS2V:
         if not dit_fsdp:
             self.noise_model = WanModel_S2V.from_pretrained(
                 checkpoint_dir,
-                torch_dtype=self.param_dtype,
+                torch_dtype=self.compute_dtype,
                 device_map=self.device)
         else:
             self.noise_model = WanModel_S2V.from_pretrained(
-                checkpoint_dir, torch_dtype=self.param_dtype)
+                checkpoint_dir, torch_dtype=self.compute_dtype)
 
         self.noise_model = self._configure_model(
             model=self.noise_model,
@@ -180,7 +183,7 @@ class WanS2V:
             model = shard_fn(model)
         else:
             if convert_model_dtype:
-                model.to(self.param_dtype)
+                model.to(self.compute_dtype)
             if not self.init_on_cpu:
                 model.to(self.device)
 
@@ -534,7 +537,7 @@ class WanS2V:
         out = []
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
+                autocast_for_device(self.device, self.compute_dtype),
                 torch.no_grad(),
         ):
             for r in range(num_repeat):
@@ -612,7 +615,7 @@ class WanS2V:
                     }
                 if offload_model or self.init_on_cpu:
                     self.noise_model.to(self.device)
-                    torch.cuda.empty_cache()
+                    empty_cache(self.device)
 
                 for i, t in enumerate(tqdm(timesteps)):
                     latent_model_input = latents[0:1]
@@ -643,8 +646,8 @@ class WanS2V:
 
                 if offload_model:
                     self.noise_model.cpu()
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
+                    synchronize(self.device)
+                    empty_cache(self.device)
                 latents = torch.stack(latents)
                 if not (drop_first_motion and r == 0):
                     decode_latents = torch.cat([motion_latents, latents], dim=2)
@@ -672,7 +675,7 @@ class WanS2V:
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            synchronize(self.device)
         if dist.is_initialized():
             dist.barrier()
 

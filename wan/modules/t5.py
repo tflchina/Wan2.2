@@ -61,7 +61,7 @@ class T5LayerNorm(nn.Module):
     def forward(self, x):
         x = x * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) +
                             self.eps)
-        if self.weight.dtype in [torch.float16, torch.bfloat16]:
+        if self.weight.dtype in [torch.float16, torch.float32]:
             x = x.type_as(self.weight)
         return self.weight * x
 
@@ -418,7 +418,7 @@ def _t5(name,
         return_tokenizer=False,
         tokenizer_kwargs={},
         dtype=torch.float32,
-        device='cpu',
+        device="cpu",
         **kwargs):
     # sanity check
     assert not (encoder_only and decoder_only)
@@ -474,8 +474,8 @@ class T5EncoderModel:
     def __init__(
         self,
         text_len,
-        dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        dtype=torch.float32,
+        device="cpu",
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,

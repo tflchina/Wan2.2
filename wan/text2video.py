@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from functools import partial
 
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 from tqdm import tqdm
 
@@ -20,6 +19,7 @@ from .distributed.util import get_world_size
 from .modules.model import WanModel
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_1 import Wan2_1_VAE
+from .utils.device import autocast_for_device, empty_cache, resolve_device, synchronize
 from .utils.fm_solvers import (
     FlowDPMSolverMultistepScheduler,
     get_sampling_sigmas,
@@ -42,6 +42,7 @@ class WanT2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        device=None,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -69,7 +70,9 @@ class WanT2V:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = device if device is not None else resolve_device(
+            device_id=device_id)
+        self.device_type = self.device.type
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
@@ -78,6 +81,7 @@ class WanT2V:
         self.num_train_timesteps = config.num_train_timesteps
         self.boundary = config.boundary
         self.param_dtype = config.param_dtype
+        self.compute_dtype = self.param_dtype if self.device_type == "cuda" else torch.float32
 
         if t5_fsdp or dit_fsdp or use_sp:
             self.init_on_cpu = False
@@ -160,7 +164,7 @@ class WanT2V:
             model = shard_fn(model)
         else:
             if convert_model_dtype:
-                model.to(self.param_dtype)
+                model.to(self.compute_dtype)
             if not self.init_on_cpu:
                 model.to(self.device)
 
@@ -298,7 +302,7 @@ class WanT2V:
 
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
+                autocast_for_device(self.device, self.compute_dtype),
                 torch.no_grad(),
                 no_sync_low_noise(),
                 no_sync_high_noise(),
@@ -363,7 +367,7 @@ class WanT2V:
             if offload_model:
                 self.low_noise_model.cpu()
                 self.high_noise_model.cpu()
-                torch.cuda.empty_cache()
+                empty_cache(self.device)
             if self.rank == 0:
                 videos = self.vae.decode(x0)
 
@@ -371,7 +375,7 @@ class WanT2V:
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            synchronize(self.device)
         if dist.is_initialized():
             dist.barrier()
 

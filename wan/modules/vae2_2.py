@@ -2,7 +2,6 @@
 import logging
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -63,7 +62,7 @@ class Upsample(nn.Upsample):
 
     def forward(self, x):
         """
-        Fix bfloat16 support for nearest neighbor interpolation.
+        Fix float32 support for nearest neighbor interpolation.
         """
         return super().forward(x.float()).type_as(x)
 
@@ -1025,7 +1024,10 @@ class Wan2_2_VAE:
         try:
             if not isinstance(videos, list):
                 raise TypeError("videos should be a list")
-            with amp.autocast(dtype=self.dtype):
+            device_type = videos[0].device.type
+            target_dtype = self.dtype if device_type == "cuda" else torch.float32
+            with torch.amp.autocast(
+                    device_type=device_type, dtype=target_dtype):
                 return [
                     self.model.encode(u.unsqueeze(0),
                                       self.scale).float().squeeze(0)
@@ -1039,7 +1041,10 @@ class Wan2_2_VAE:
         try:
             if not isinstance(zs, list):
                 raise TypeError("zs should be a list")
-            with amp.autocast(dtype=self.dtype):
+            device_type = zs[0].device.type
+            target_dtype = self.dtype if device_type == "cuda" else torch.float32
+            with torch.amp.autocast(
+                    device_type=device_type, dtype=target_dtype):
                 return [
                     self.model.decode(u.unsqueeze(0),
                                       self.scale).float().clamp_(-1,
