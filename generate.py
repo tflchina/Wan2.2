@@ -68,12 +68,9 @@ spm_name_map = {
 
 
 def _choose_t2v_module_to_trace(wan_t2v):
-    if hasattr(wan_t2v, "low_noise_model") and hasattr(wan_t2v, "high_noise_model"):
-        wrapper = torch.nn.Module()
-        wrapper.low_noise_model = wan_t2v.low_noise_model
-        wrapper.high_noise_model = wan_t2v.high_noise_model
-        logging.info("Tracing module: low_noise_model + high_noise_model")
-        return wrapper
+    if hasattr(wan_t2v, "high_noise_model"):
+        logging.info("Tracing module: high_noise_model")
+        return wan_t2v.high_noise_model
     if hasattr(wan_t2v, "low_noise_model"):
         logging.info("Tracing module: low_noise_model")
         return wan_t2v.low_noise_model
@@ -453,6 +450,7 @@ def generate(args):
         tracer = None
         if rank == 0:
             module_to_trace = _choose_t2v_module_to_trace(wan_t2v)
+            print(module_to_trace)
             trace_recorder = EventRecorder()
             tracer = OpAndModuleTracer(
                 module_to_trace,
