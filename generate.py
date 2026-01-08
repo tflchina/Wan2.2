@@ -19,6 +19,7 @@ from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CON
 from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import merge_video_audio, save_video, str2bool
+from op_tracer import OpAndModuleTracer, EventRecorder
 
 
 EXAMPLE_PROMPT = {
@@ -57,6 +58,39 @@ EXAMPLE_PROMPT = {
             "收到好友从远方寄来的生日礼物，那份意外的惊喜与深深的祝福让我心中充满了甜蜜的快乐，笑容如花儿般绽放。"
     },
 }
+
+
+spm_name_map = {
+    "scaled_dot_product_attention": "ScaledDotProductAttention",
+    "RMSNorm": "RMSNorm",
+    "LayerNorm": "LayerNorm",
+}
+
+
+def _choose_t2v_module_to_trace(wan_t2v):
+    if hasattr(wan_t2v, "low_noise_model") and hasattr(wan_t2v, "high_noise_model"):
+        wrapper = torch.nn.Module()
+        wrapper.low_noise_model = wan_t2v.low_noise_model
+        wrapper.high_noise_model = wan_t2v.high_noise_model
+        logging.info("Tracing module: low_noise_model + high_noise_model")
+        return wrapper
+    if hasattr(wan_t2v, "low_noise_model"):
+        logging.info("Tracing module: low_noise_model")
+        return wan_t2v.low_noise_model
+    candidates = [
+        (name, module)
+        for name, module in wan_t2v.__dict__.items()
+        if isinstance(module, torch.nn.Module)
+    ]
+    if candidates:
+        name, module = max(
+            candidates, key=lambda kv: sum(p.numel() for p in kv[1].parameters(recurse=True))
+        )
+        logging.info(f"Tracing module (fallback): {name}")
+        return module
+    raise RuntimeError("No torch.nn.Module found in WanT2V to trace.")
+
+
 
 
 def _validate_args(args):
@@ -400,6 +434,7 @@ def generate(args):
         args.prompt = input_prompt[0]
         logging.info(f"Extended prompt: {args.prompt}")
 
+    trace_recorder = None
     if "t2v" in args.task:
         logging.info("Creating WanT2V pipeline.")
         wan_t2v = wan.WanT2V(
@@ -415,16 +450,32 @@ def generate(args):
         )
 
         logging.info(f"Generating video ...")
-        video = wan_t2v.generate(
-            args.prompt,
-            size=SIZE_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
+        tracer = None
+        if rank == 0:
+            module_to_trace = _choose_t2v_module_to_trace(wan_t2v)
+            trace_recorder = EventRecorder()
+            tracer = OpAndModuleTracer(
+                module_to_trace,
+                trace_recorder,
+                spm_name_map=spm_name_map,
+                leaf_only=True,
+                capture_tensors=True,
+                max_tensors_per_event=8,
+            ).start()
+        try:
+            video = wan_t2v.generate(
+                args.prompt,
+                size=SIZE_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+        finally:
+            if tracer is not None:
+                tracer.stop()
     elif "ti2v" in args.task:
         logging.info("Creating WanTI2V pipeline.")
         wan_ti2v = wan.WanTI2V(
@@ -555,6 +606,10 @@ def generate(args):
             nrow=1,
             normalize=True,
             value_range=(-1, 1))
+        if trace_recorder is not None:
+            trace_path = f"{os.path.splitext(args.save_file)[0]}_trace.json"
+            trace_recorder.save(trace_path)
+            logging.info(f"Trace saved to {trace_path}")
         if "s2v" in args.task:
             if args.enable_tts is False:
                 merge_video_audio(video_path=args.save_file, audio_path=args.audio)
